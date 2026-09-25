@@ -1,0 +1,15 @@
+# ===== 运行时核心 =====
+# 时区数据库（Windows 需显式依赖，供 zoneinfo 正确解析 IANA 时区 / 夏令时）
+tzdata>=2024.1
+# 浏览器自动化（采集引擎，支持持久化 Session / Cookie）
+playwright>=1.45.0
+# 现代桌面 UI（深色主题、卡片布局、左侧导航）
+customtkinter>=5.2.2
+# XLSX 导出
+openpyxl>=3.1.5
+
+# ===== 测试 =====
+pytest>=8.0.0
+
+# ===== 打包 =====
+pyinstaller>=6.10.0

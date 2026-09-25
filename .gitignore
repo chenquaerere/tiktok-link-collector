@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# 数据与运行时产物
+data/
+logs/
+exports/
+links_log/
+config.json
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 浏览器 Session（含登录态，禁止提交）
+user_data/
+.browser/
+
+# 环境变量（真实密钥不入库）
+.env
+
+# IDE / 系统
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# 打包产物
+*.spec
+*.spec.bak
+build/
+dist/
+
+# 探针/诊断证据（含真实账号数据：用户名、secUid、完整 API 响应，禁止提交）
+diagnostics/
+
+# 截图与本地实验脚本产物
+.screenshots/
+tests/make_shots.py
+tests/merge_shots.py
+
+# 打包备份目录（体积大且含旧版本；用宽泛前缀匹配 dist_bak3 / dist_bak_v9 等）
+dist_bak*/
+build_bak*/
+.git_preview_tmp/
+
+# 测试缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# PyInstaller 中间产物
+build/
+*.manifest
