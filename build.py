@@ -97,6 +97,10 @@ def build() -> None:
         "--noconfirm",
         "--clean",
         "--noupx",
+        # 应用图标（exe + 任务栏 + 资源管理器）
+        "--icon", str(ROOT / "assets" / "icon.ico"),
+        # 随包分发图标资源（供窗口标题栏运行时加载）
+        "--add-data", f"{ROOT / 'assets'};assets",
         # 打包数据/依赖
         "--collect-all", "customtkinter",
         "--collect-all", "playwright",

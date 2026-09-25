@@ -41,6 +41,7 @@ class AppWindow(ctk.CTk):
         self.title(f"{APP_NAME_CN} · {APP_NAME}")
         self.geometry("1280x800")
         self.minsize(900, 600)
+        self._apply_window_icon()
         self.configure(fg_color=COLORS["bg"])
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -157,6 +158,22 @@ class AppWindow(ctk.CTk):
 
     def set_status(self, text: str) -> None:
         self.status_label.configure(text=text)
+
+    def _apply_window_icon(self) -> None:
+        """设置窗口标题栏/任务栏图标（开发态用项目 assets，frozen 用随包资源）。"""
+        try:
+            import sys
+            from pathlib import Path
+
+            if getattr(sys, "frozen", False):
+                base = Path(sys.executable).parent / "_internal"
+            else:
+                base = Path(__file__).resolve().parents[2]
+            ico = base / "assets" / "icon.ico"
+            if ico.exists():
+                self.iconbitmap(str(ico))
+        except Exception:
+            pass  # 图标缺失不影响运行
 
     def notify(self, message: str, title: str = "", level: str = "info",
                duration: int = 3200) -> None:
