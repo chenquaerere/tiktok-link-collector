@@ -46,6 +46,9 @@ diagnostics/
 tests/make_shots.py
 tests/merge_shots.py
 
+# 发版产物（便携包 zip，体积大，不入库）
+release/
+
 # 打包备份目录（体积大且含旧版本；用宽泛前缀匹配 dist_bak3 / dist_bak_v9 等）
 dist_bak*/
 build_bak*/
