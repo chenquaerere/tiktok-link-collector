@@ -23,7 +23,11 @@ class PageHeader(ctk.CTkFrame):
                          text_color=COLORS["text_dim"], anchor="w").pack(
                 anchor="w", pady=(2, 0))
 
-        self.actions = ctk.CTkFrame(self, fg_color="transparent")
+        # ⚠️ 空的 CTkFrame 默认请求 200×200，会把标题行撑到 200px 高
+        #    （标题被垂直居中、下方内容区被大面积挤压——2026-09-26 聊天页
+        #    「头部占半屏」的真正根因，此前误判为 BasePage rowconfigure）。
+        #    必须显式给最小尺寸，按钮加入后 pack 传播会自动撑开。
+        self.actions = ctk.CTkFrame(self, fg_color="transparent", width=1, height=1)
         self.actions.grid(row=0, column=1, sticky="e")
 
     def add_action(self, text: str, command, *, width: int = 100, height: int = 34,

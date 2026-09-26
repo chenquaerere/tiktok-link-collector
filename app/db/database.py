@@ -96,6 +96,33 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT
 );
 
+-- 聊天链接采集模块（独立板块；SCHEMA_VERSION 不升级，靠 IF NOT EXISTS 幂等追加，
+-- 不触碰既有 accounts/videos 等表数据）
+CREATE TABLE IF NOT EXISTS chat_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stable_key TEXT NOT NULL UNIQUE,          -- conv:xxx / secuid:xxx / uid:xxx
+    chat_type TEXT NOT NULL,                  -- friend / group
+    name TEXT NOT NULL DEFAULT '',
+    handle TEXT NOT NULL DEFAULT '',
+    uid TEXT NOT NULL DEFAULT '',
+    sec_uid TEXT NOT NULL DEFAULT '',
+    conversation_id TEXT NOT NULL DEFAULT '',
+    last_used_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS chat_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stable_key TEXT NOT NULL,                 -- 所属聊天目标（chat_targets.stable_key）
+    video_id TEXT NOT NULL,
+    video_url TEXT NOT NULL,
+    order_num INTEGER NOT NULL DEFAULT 0,     -- 0 = 最新
+    collected_at TEXT NOT NULL DEFAULT '',
+    UNIQUE(stable_key, video_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_links_target ON chat_links(stable_key);
+CREATE INDEX IF NOT EXISTS idx_chat_targets_used ON chat_targets(last_used_at);
+
 CREATE INDEX IF NOT EXISTS idx_videos_account ON videos(account_id);
 CREATE INDEX IF NOT EXISTS idx_videos_publish_date ON videos(publish_date);
 CREATE INDEX IF NOT EXISTS idx_videos_first_task ON videos(first_task_id);
@@ -106,6 +133,8 @@ CREATE INDEX IF NOT EXISTS idx_collect_logs_video ON collect_logs(video_id);
 
 # 删除顺序：先子表后父表，避免外键约束报错
 _DROP_ALL = """
+DROP TABLE IF EXISTS chat_links;
+DROP TABLE IF EXISTS chat_targets;
 DROP TABLE IF EXISTS collect_logs;
 DROP TABLE IF EXISTS task_accounts;
 DROP TABLE IF EXISTS videos;
@@ -402,6 +431,24 @@ class Database:
             params.append(task_id)
         sql += " ORDER BY publish_time DESC"
         return self.query(sql, tuple(params))
+
+    def delete_videos(self, *, account_id: Optional[str] = None,
+                      publish_date: Optional[str] = None) -> int:
+        """按账号 / 发布日期删除作品记录（清空用），返回删除条数。
+
+        与 query_videos 同一套过滤条件；都不传 = 清空全部。
+        """
+        sql = "DELETE FROM videos WHERE 1=1"
+        params: list = []
+        if account_id is not None:
+            sql += " AND account_id = ?"
+            params.append(account_id)
+        if publish_date is not None:
+            sql += " AND publish_date = ?"
+            params.append(publish_date)
+        with self.transaction():
+            cur = self.execute(sql, tuple(params))
+            return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
     def list_tasks(self, limit: int = 50) -> List[sqlite3.Row]:
         return self.query(

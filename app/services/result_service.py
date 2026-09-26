@@ -25,6 +25,11 @@ class ResultService:
                                     publish_date=publish_date, task_id=task_id)
 
     # ---- 复制 ----
+    def clear_videos(self, *, account_id: Optional[str] = None,
+                     publish_date: Optional[str] = None) -> int:
+        """清空作品链接（与查询同套过滤条件；全空 = 清空全部），返回删除条数。"""
+        return self.db.delete_videos(account_id=account_id, publish_date=publish_date)
+
     def to_url_text(self, rows) -> str:
         """纯 URL 文本：每条链接后跟一个空行（按视频去重，保持顺序）。
 

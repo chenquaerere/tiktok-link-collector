@@ -18,10 +18,43 @@ _ICONS = {
 
 
 def _modal(win) -> None:
-    win.transient(win.master)
-    win.grab_set()
+    """把窗口变成模态弹窗。
+
+    ⚠️ 加固点（2026-09-26）：
+    - `grab_set` 在窗口尚未 viewable 时会抛 TclError（"grab failed"），
+      异常会顺着按钮回调冒泡被 tkinter 吞掉 → 用户看到「点了没反应」。
+      这里吞掉异常并改用 topmost 兜底，保证弹窗一定能被看见。
+    - 置顶 + 延迟再次 lift/focus，避免弹窗被主窗口遮住（遮住时主窗口被
+      grab 卡住、用户以为程序没反应）。
+    """
+    try:
+        win.transient(win.master)
+    except Exception:
+        pass
+    try:
+        win.attributes("-topmost", True)
+    except Exception:
+        pass
+    try:
+        win.grab_set()
+    except Exception:
+        pass          # grab 失败不再中断后续流程（只损失「父窗口不可点」）
     win.lift()
-    win.focus_force()
+    try:
+        win.focus_force()
+    except Exception:
+        pass
+
+    def _re_lift():
+        try:
+            win.lift()
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
+    try:
+        win.after(120, _re_lift)
+    except Exception:
+        pass
 
 
 def confirm(master, title: str, message: str, danger: bool = False,

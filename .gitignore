@@ -49,6 +49,9 @@ tests/merge_shots.py
 # 打包备份目录（体积大且含旧版本；用宽泛前缀匹配 dist_bak3 / dist_bak_v9 等）
 dist_bak*/
 build_bak*/
+dist_old_*/
+build_old_*/
+spec_*.bak
 .git_preview_tmp/
 
 # 测试缓存

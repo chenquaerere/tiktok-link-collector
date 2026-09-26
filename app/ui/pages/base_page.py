@@ -13,7 +13,9 @@ class BasePage(ctk.CTkFrame):
         super().__init__(master, fg_color=COLORS["bg"], corner_radius=0, **kw)
         self.ctx = ctx
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        # 注意：不要给 row 0（页面标题行）设伸展权重——否则标题下方会多出
+        # 一大块空白、挤压内容区（2026-09-26 聊天页头部占半屏的根因）。
+        # 各页面自行对内容行 grid_rowconfigure(weight=N)。
 
     # ---- 生命周期 ----
     def refresh(self) -> None:
@@ -54,3 +56,15 @@ class BasePage(ctk.CTkFrame):
         win = self.window
         if hasattr(win, "set_status"):
             win.set_status(text)
+
+    # ---- 线程安全回调 ----
+    def ui_call(self, fn, *args) -> None:
+        """从 worker 线程安全地更新界面（禁止在子线程直接调 after）。"""
+        win = self.window
+        if hasattr(win, "ui_call"):
+            win.ui_call(fn, *args)
+            return
+        try:
+            self.after(0, lambda: fn(*args))
+        except Exception:  # noqa: BLE001
+            pass

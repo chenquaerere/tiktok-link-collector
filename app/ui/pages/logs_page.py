@@ -30,7 +30,7 @@ class LogsPage(BasePage):
 
     def _build(self) -> None:
         self.header = PageHeader(self, "日志", "应用运行日志（最近 500 行）")
-        self.header.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 8))
+        self.header.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 12))
         self.header.add_action("打开日志目录", self._open_dir, kind="ghost", width=120)
         self.header.add_action("刷新", self._load, kind="primary", width=80)
 
@@ -83,7 +83,7 @@ class LogsPage(BasePage):
                 tail = None
             except Exception as exc:  # noqa: BLE001
                 tail = [f"读取失败：{exc}\n"]
-            self.after(0, lambda: self._on_loaded(tail))
+            self.ui_call(self._on_loaded, tail)
 
         threading.Thread(target=worker, daemon=True).start()
 

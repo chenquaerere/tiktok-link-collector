@@ -124,6 +124,17 @@ class AppServices:
         self._engine = None
         self._collector = None
 
+    def build_chat_service(self):
+        """构建聊天链接采集服务（轻量对象，直接新建）。"""
+        from app.services.chat_service import ChatService
+
+        return ChatService(
+            base_dir=str(self.base_dir),
+            config=self.config,
+            db=self.db,
+            logger=get_logger("chat.service"),
+        )
+
     def save_config(self) -> None:
         self.config.save(str(self.config_path))
 

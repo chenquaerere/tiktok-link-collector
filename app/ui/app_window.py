@@ -8,6 +8,9 @@
 """
 from __future__ import annotations
 
+import queue
+import threading
+
 import customtkinter as ctk
 
 from app.constants import APP_NAME, APP_NAME_CN, APP_VERSION
@@ -19,6 +22,7 @@ NAV_ITEMS = [
     ("dashboard", "▣", "仪表盘"),
     ("accounts", "◉", "账号管理"),
     ("collect", "▶", "采集任务"),
+    ("chat", "✉", "聊天链接采集"),
     ("results", "▤", "采集结果"),
     ("history", "↺", "历史记录"),
     ("settings", "⚙", "设置"),
@@ -47,6 +51,14 @@ class AppWindow(ctk.CTk):
         self.grid_rowconfigure(1, weight=1)
 
         self.toast = ToastManager(self)
+
+        # 线程安全的 UI 调度队列：worker 线程禁止直接调 after()
+        # （tkinter 的 after 非线程安全，会抛
+        #   RuntimeError: main thread is not in main loop，
+        #   表现为界面永不更新且无任何报错）。统一走 ui_call()。
+        self._ui_q: "queue.Queue" = queue.Queue()
+        self._ui_pump_id = None
+        self._start_ui_pump()
 
         self._nav_buttons = {}
         self.pages = {}
@@ -123,6 +135,7 @@ class AppWindow(ctk.CTk):
     # ---- 页面 ----
     def _register_pages(self) -> None:
         from .pages.accounts_page import AccountsPage
+        from .pages.chat_page import ChatPage
         from .pages.collect_page import CollectPage
         from .pages.dashboard_page import DashboardPage
         from .pages.history_page import HistoryPage
@@ -134,6 +147,7 @@ class AppWindow(ctk.CTk):
             "dashboard": DashboardPage(self.content, self.ctx),
             "accounts": AccountsPage(self.content, self.ctx),
             "collect": CollectPage(self.content, self.ctx),
+            "chat": ChatPage(self.content, self.ctx),
             "results": ResultsPage(self.content, self.ctx),
             "history": HistoryPage(self.content, self.ctx),
             "settings": SettingsPage(self.content, self.ctx),
@@ -158,6 +172,39 @@ class AppWindow(ctk.CTk):
 
     def set_status(self, text: str) -> None:
         self.status_label.configure(text=text)
+
+    # ---- 线程安全 UI 调度 ----
+    def ui_call(self, fn, *args) -> None:
+        """把回调安全地排到 UI 线程执行。
+
+        - 主线程调用：直接 after(0)
+        - worker 线程调用：入队，由主线程 100ms 轮询取出执行
+        """
+        if threading.current_thread() is threading.main_thread():
+            try:
+                self.after(0, lambda: fn(*args))
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        self._ui_q.put((fn, args))
+
+    def _start_ui_pump(self) -> None:
+        try:
+            self._ui_pump_id = self.after(100, self._ui_pump)
+        except Exception:  # noqa: BLE001
+            self._ui_pump_id = None
+
+    def _ui_pump(self) -> None:
+        while True:
+            try:
+                fn, args = self._ui_q.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn(*args)
+            except Exception:  # noqa: BLE001
+                pass
+        self._start_ui_pump()
 
     def _apply_window_icon(self) -> None:
         """设置窗口标题栏/任务栏图标（开发态用项目 assets，frozen 用随包资源）。"""
@@ -208,14 +255,14 @@ class AppWindow(ctk.CTk):
             info = self.ctx.check_for_update()
             if info is None:
                 if not silent:
-                    self.after(0, lambda: (
+                    self.ui_call(lambda: (
                         self.set_status("已是最新版本"),
                         self.toast("当前已是最新版本", title="检查更新", level="success"),
                     ))
                 else:
-                    self.after(0, lambda: self.set_status("就绪"))
+                    self.ui_call(self.set_status, "就绪")
             else:
-                self.after(0, lambda: (
+                self.ui_call(lambda: (
                     self.set_status(f"发现新版本 {info.version}"),
                     update_available(self, info.version, info.notes, info.url),
                 ))

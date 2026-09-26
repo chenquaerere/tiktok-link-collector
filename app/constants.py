@@ -2,7 +2,7 @@
 
 APP_NAME = "TikTok Link Collector"
 APP_NAME_CN = "TikTok 作品链接采集器"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 # 默认路径（相对项目根）
 DEFAULT_DB_PATH = "data/tiktok_link_collector.db"

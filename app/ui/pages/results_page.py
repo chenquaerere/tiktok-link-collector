@@ -25,13 +25,27 @@ class ResultsPage(BasePage):
         self._url_by_id = {}   # video_id -> 完整 URL（点击复制 / hover 用）
         self._loading = None
         self._tooltip = None
+        self._clear_armed = False   # 「确认清空」二次确认态
         self._build()
 
     def _build(self) -> None:
         self.header = PageHeader(self, "采集结果", "查看、筛选、复制与导出已采集的作品链接")
         self.header.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 12))
+        # 操作按钮放页头右侧动作区（筛选行太挤放不下，也正好利用头部空间）
+        self._clear_btn = self.header.add_action(
+            "清空链接", self._clear_links, width=92,
+            color=COLORS["danger"], hover=COLORS["danger_hover"])
+        self.header.add_action("复制全部", self._copy_all, width=92,
+                               color=COLORS["accent"], hover=COLORS["accent_hover"])
+        self.header.add_action("链接窗口", self._open_link_window, width=92)
+        self._export_menu = ctk.CTkOptionMenu(
+            self.header.actions, width=140, height=34, font=FONT["body"],
+            values=["导出 TXT(纯URL)", "导出 TXT(分组)", "导出 CSV", "导出 XLSX"],
+            command=lambda _: self._export())
+        self._export_menu.set("导出…")
+        self._export_menu.pack(side="left", padx=(4, 0))
 
-        # 筛选 + 操作
+        # 筛选行
         bar = ctk.CTkFrame(self, fg_color=COLORS["surface"], corner_radius=12)
         bar.grid(row=1, column=0, sticky="ew", padx=24, pady=(0, 12))
         ctk.CTkLabel(bar, text="发布日期", font=FONT["secondary"],
@@ -52,20 +66,7 @@ class ResultsPage(BasePage):
         self._status_menu.set("全部状态")
         self._status_menu.grid(row=0, column=5, padx=4)
         ctk.CTkButton(bar, text="查询", width=72, height=34, fg_color=COLORS["primary"],
-                      command=self._query).grid(row=0, column=6, padx=(12, 12))
-
-        ctk.CTkButton(bar, text="链接窗口", width=90, height=34, fg_color=COLORS["primary"],
-                      hover_color=COLORS["primary_hover"],
-                      command=self._open_link_window).grid(row=0, column=7, padx=4)
-        ctk.CTkButton(bar, text="复制全部", width=90, height=34, fg_color=COLORS["accent"],
-                      hover_color=COLORS["accent_hover"], command=self._copy_all).grid(
-            row=0, column=8, padx=4)
-        self._export_menu = ctk.CTkOptionMenu(
-            bar, width=150, height=34, font=FONT["body"],
-            values=["导出 TXT(纯URL)", "导出 TXT(分组)", "导出 CSV", "导出 XLSX"],
-            command=lambda _: self._export())
-        self._export_menu.set("导出…")
-        self._export_menu.grid(row=0, column=9, padx=(8, 16))
+                      command=self._query).grid(row=0, column=6, padx=(12, 16))
 
         # 结果表格（元信息，占上半部分）
         self._table = ScrollableTable(
@@ -254,10 +255,10 @@ class ResultsPage(BasePage):
                                          status=s.get("status", ""))
                              for s in self.ctx.result_service.account_stats(self._rows)]
                     ExportService.export_xlsx(rows, stats, path)
-                self.after(0, lambda: self._on_export_done(path, len(rows)))
+                self.ui_call(self._on_export_done, path, len(rows))
             except Exception as exc:  # noqa: BLE001
                 self.ctx.logger.exception("导出失败")
-                self.after(0, lambda: self._on_export_error(str(exc)))
+                self.ui_call(self._on_export_error, str(exc))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -306,3 +307,61 @@ class ResultsPage(BasePage):
         self.clipboard_append(text)
         n = len([x for x in text.splitlines() if x.strip()])
         self.toast(f"已复制 {n} 条链接到剪贴板", title="已复制", level="success")
+
+    # ---- 清空（内联二次确认，不依赖模态弹窗） ----
+    def _clear_links(self) -> None:
+        """清空作品链接：第一次点击进入「确认」态，3 秒内再点一次才执行。
+
+        旧版用 CTkToplevel 模态确认框：弹窗一旦被主窗口遮住，grab 会卡住
+        主界面，用户看到的就是「点了没反应、链接还在」（且无任何日志）。
+        改为按钮内联确认后彻底消除这个不确定性。
+        """
+        date = self._date_entry.get().strip() or None
+        acc = self._account_menu.get()
+        account_id = None if (not acc or acc == "全部账号") else acc.lstrip("@")
+
+        scope = []
+        if date:
+            scope.append(f"发布日期={date}")
+        if account_id:
+            scope.append(f"账号=@{account_id}")
+        scope_text = "、".join(scope) if scope else "全部链接"
+
+        n = len(self._rows)
+        if n == 0:
+            self.toast("当前筛选条件下没有链接，无需清空", title="提示", level="info")
+            return
+
+        if not self._clear_armed:
+            # 第一次点击：按钮变红进入确认态，3 秒无操作自动复原
+            self._clear_armed = True
+            try:
+                self._clear_btn.configure(
+                    text=f"确认清空{n}条?", fg_color=COLORS["danger"],
+                    hover_color=COLORS["danger_hover"], width=130)
+            except Exception:  # noqa: BLE001
+                pass
+            self.toast(f"再点一次「确认清空」即删除 {scope_text}（{n} 条），不可恢复",
+                       title="请确认", level="warning", duration=3200)
+            self.after(3000, self._disarm_clear)
+            return
+
+        self._disarm_clear()
+        try:
+            deleted = self.ctx.result_service.clear_videos(
+                account_id=account_id, publish_date=date)
+        except Exception as exc:  # noqa: BLE001
+            self.show_error_dialog("清空失败", str(exc), "详细错误已写入日志。")
+            return
+        self.toast(f"已清空 {deleted} 条链接（{scope_text}）",
+                   title="清空完成", level="success")
+        self._query()
+
+    def _disarm_clear(self) -> None:
+        """退出「确认清空」态，恢复按钮原样。"""
+        self._clear_armed = False
+        try:
+            self._clear_btn.configure(text="清空链接", fg_color=COLORS["danger"],
+                                      hover_color=COLORS["danger_hover"], width=92)
+        except Exception:  # noqa: BLE001
+            pass

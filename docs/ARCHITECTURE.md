@@ -1,6 +1,6 @@
 # TikTok Link Collector —— 架构设计文档
 
-> TikTok作品链接采集器 | 全栈架构分析 v1.0.0
+> TikTok作品链接采集器 | 全栈架构分析 v1.1.0
 
 ---
 
@@ -46,7 +46,7 @@ TikTokLinkCollector/
 │   │   ├── dedup.py            # ★ 去重
 │   │   └── collect_logic.py    # ★ 采集规则（宁可少采不可错采）
 │   ├── db/
-│   │   └── database.py         # SQLite：6 表 + 索引 + settings
+│   │   └── database.py         # SQLite：8 表 + 索引 + settings
 │   ├── collector/              # 采集引擎
 │   │   ├── browser.py          # Playwright 生命周期（headless=new + 线程守卫）
 │   │   ├── session.py          # 持久化登录态
@@ -56,11 +56,19 @@ TikTokLinkCollector/
 │   │   ├── profile_collector.py     # 主页采集（实现 Fetcher 协议）
 │   │   ├── task_runner.py      # 任务调度：重试/停止/单账号隔离
 │   │   └── engine.py           # 完整采集引擎编排（最新 N 条 + 替换式记录）
-│   ├── services/               # 账号/结果服务
-│   └── ui/                     # customtkinter 界面（7 页面 + 链接窗口）
+│   ├── chat/                   # ★ 聊天链接采集（v1.1.0 新增，与作品采集完全隔离）
+│   │   ├── models.py           # 目标/候选/链接/结果 数据模型
+│   │   ├── provider.py         # 消息页访问（会话列表/好友API/面板卡片/itemDetail）
+│   │   ├── resolver.py         # 目标校验（聊天头部比对）
+│   │   ├── collector.py        # 采集编排（进对话框→校验→取卡片→解析→滚动）
+│   │   ├── search.py           # 本地候选检索
+│   │   └── store.py            # 聊天目标/链接 持久化
+│   ├── services/               # 账号/结果服务 + chat_service（聊天采集编排）
+│   └── ui/                     # customtkinter 界面（8 页面 + 链接窗口）
 ├── mocks/
 │   └── mock_provider.py        # ★ Mock 数据源（A/B/C/D/E 场景）
-├── tests/                      # ★ 自动化测试（135 用例）
+├── diagnostics/                # 站点探针 + 真实采集验证 + UI 体检脚本
+├── tests/                      # ★ 自动化测试（189 用例）
 └── docs/ARCHITECTURE.md
 ```
 
@@ -89,7 +97,7 @@ TikTokLinkCollector/
 
 ---
 
-## 5. 数据模型（SQLite，6 表）
+## 5. 数据模型（SQLite，8 表）
 
 | 表 | 用途 | 关键索引 |
 | ---- | ---- | ---- |
@@ -99,6 +107,8 @@ TikTokLinkCollector/
 | task_accounts | 任务×账号明细（target/actual/status/error_reason） | task_id+account_id 唯一 |
 | collect_logs | 采集日志（task_id/account_id/level/message） | task_id |
 | settings | 键值设置 | key 主键 |
+| chat_targets | 聊天采集「最近使用」目标（stable_key/类型/名称/handle/uid/conversation_id/last_used_at） | stable_key 主键 |
+| chat_links | 聊天采集到的链接（stable_key/video_id/video_url/order_num/collected_at） | stable_key |
 
 ---
 
@@ -158,6 +168,11 @@ TikTokLinkCollector/
 | P33 | 交互系统 | ✅ Toast/Dialog/EmptyState/LoadingState/错误统一 |
 | P34 | 高DPI/响应式/性能 | ✅ 900×600 + 高DPI + 导出/日志后台线程 |
 | P35 | 最终视觉验收 + 回归 + 发布 | ✅ 135 回归 + 重打包 + 增量部署 |
+| P36 | **聊天链接采集模块**（独立板块） | ✅ 探针（docs/CHAT_PROBE_REPORT.md）+ `app/chat/` 七件套 + UI 页 + 21 用例；全量 166 测试通过 |
+| P37 | 聊天取链根因修复（作用域 + React props + itemDetail） | ✅ 作用域限定 `DivChatBox`；从 `__reactProps$*` 取作品 ID；详情接口取作者；顺序改垂直位置（下=最新）；详见 docs/CHAT_MODULE.md |
+| P38 | 聊天页交互修复（整行可点 / 去模态确认 / 真实停止） | ✅ 整行点选 + 双击直采 + 选中高亮；清空改内联二次确认；Stop 用 `threading.Event` 真停；进度条实时推进 |
+| P39 | 跨线程 UI 更新统一收口 | ✅ `AppWindow.ui_call()` + 主线程泵；迁移 collect/logs/results/app_window 共 9 处；聊天页独立事件队列 |
+| P40 | 性能优化与细节打磨 | ✅ 批量并发解析 + 去掉探测页 + 条件等待（采集 23.9s→20.2s）；记住数量 / 导出 / 复制一行一条 / 头部间距统一 / 空容器体检 |
 
 ---
 
@@ -167,7 +182,12 @@ TikTokLinkCollector/
 2. ✅ ~~UI/UX 全面产品化升级~~（P30–P35 已全部落地：Design System → 页面重构 → 交互系统 → 高DPI/性能 → 最终验收）。
 3. ✅ ~~最终回归 + 打包发布~~（135 测试 + 真实采集 smoke test + 重新打包便携版 + 增量部署）。
 
-**当前版本：v1.0.0。** 后续：创建 GitHub 仓库 + 上传 Release 包，启用自动更新。
+**当前版本：v1.1.0**（2026-09-26）。
+
+- v1.0.0：首个正式版（P0–P35，135 测试）。
+- v1.1.0：新增聊天链接采集（P36–P40）+ 界面假死类缺陷修复 + 性能优化，189 测试全绿；已发布 GitHub `v1.1.0`。
+
+后续可选：账号分组/排序、聊天多会话批量采集、结果合并导出。
 
 ---
 

@@ -398,14 +398,14 @@ class CollectPage(BasePage):
                 self._status_lbl.configure(
                     text=f"[{idx + 1}/{total_n}] @{username} — {_stage_zh(status)} {extra}",
                     text_color=COLORS["text_dim"])
-            self.after(0, apply)
+            self.ui_call(apply)
 
         try:
             summary = engine.run(accounts, target_date, on_progress=on_progress)
-            self.after(0, lambda: self._on_done(summary))
+            self.ui_call(self._on_done, summary)
         except Exception as exc:  # noqa: BLE001
             self.ctx.logger.exception("采集任务异常")
-            self.after(0, lambda: self._on_error(str(exc)))
+            self.ui_call(self._on_error, str(exc))
 
     def _on_done(self, summary) -> None:
         self._running = False

@@ -19,7 +19,7 @@ class DashboardPage(BasePage):
 
     def _build(self) -> None:
         self.header = PageHeader(self, "仪表盘", "账号作品链接采集概览")
-        self.header.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 4))
+        self.header.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 12))
         self.header.add_action("开始采集", lambda: self._goto("collect"), kind="primary")
 
         # 未完成任务横幅（实时区）
