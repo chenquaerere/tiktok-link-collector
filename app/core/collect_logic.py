@@ -56,14 +56,15 @@ def collect_for_account(
     for item in items:
         diag["found"] += 1
 
-        # 1) 已达目标数量 → 停止
-        if len(selected) >= target_count:
-            break
-
-        # 2) 去重
+        # 1) 同一作品在列表里重复出现（置顶等）→ 跳过且不计数。
+        #    放在数量检查之前，保证 duplicates 统计准确（与 engine._collect_once 保持一致）。
         if dedup.is_duplicate(item.video_id):
             diag["duplicates"] += 1
             continue
+
+        # 2) 已达目标数量 → 停止
+        if len(selected) >= target_count:
+            break
 
         # 3) 解析发布时间（尽力记录；无法确认照常采集）
         resolve_item(item, resolver)

@@ -86,10 +86,14 @@ class VideoParser:
     def _to_item(o: dict, vid: str) -> Optional[ParsedVideoItem]:
         author = o.get("author") or {}
         username = author.get("uniqueId") or ""
+        # 昵称：item_list 的 author.nickname（TikTok 显示名），实测可直接取到，
+        # 用于账号管理页辨识账号，无需额外请求。
+        nickname = author.get("nickname") or ""
         create_time = o.get("createTime")
         return ParsedVideoItem(
             video_id=vid,
             username=username,
+            nickname=nickname,
             raw_url=f"https://www.tiktok.com/@{username}/video/{vid}" if username else "",
             raw_publish_time=create_time,   # Unix 秒（int/str 均可，DateResolver 会处理）
             time_source="epoch" if create_time is not None else "none",

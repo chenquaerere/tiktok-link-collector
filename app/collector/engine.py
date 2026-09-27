@@ -98,9 +98,16 @@ class CollectEngine:
             except Exception as exc:  # noqa: BLE001 —— 清理失败不阻断采集
                 self.logger.warning("账号 @%s 旧记录清除失败: %s", acc.username, exc)
 
-        # 初始化去重器：此时库中已不含本次账号的旧记录，
-        # 去重用于本次任务内部跨账号/重复条目
-        dedup = VideoDedup(initial=self.db.load_all_video_ids())
+        # ⚠️ 绝不做「跨运行去重」（历史 bug，2026-09-27 修复）
+        #   旧实现：dedup = VideoDedup(initial=self.db.load_all_video_ids())
+        #   把**全库已有 video_id** 装进去重器 → 重新抓取时，最新作品被当成「重复」
+        #   跳过，然后继续往后捞更旧的：
+        #     · 拿到的不是最新的（与「从最新开始拿」的要求相反）
+        #     · 或凑不够数量 → 用户回填时发现「少了两条链接」
+        #   实测后果：2026-09-24 有 40 条作品被标记「重复跳过」且**从未入库**。
+        #   用户明确要求：不管之前采过没有，每次抓取都要从最新一条开始、依次取够数量。
+        #   → 去重范围收窄为「单账号 + 单次采集内」（仅用于处理置顶作品在列表里
+        #     重复渲染），在 _collect_once 内部新建，重试时也会重置。
 
         summary = {
             "task_id": task_id,
@@ -135,7 +142,7 @@ class CollectEngine:
                         summary["skipped"] += 1
                         continue
 
-                result = self._collect_account(acc, task_id, target_date, dedup, on_progress, idx, total)
+                result = self._collect_account(acc, task_id, target_date, on_progress, idx, total)
                 self.logger.info("账号 @%s 完成：status=%s target=%d actual=%d err=%r",
                                  acc.username, result.status, result.target_count,
                                  result.actual_count, result.error_reason)
@@ -182,7 +189,12 @@ class CollectEngine:
         return summary
 
     # ---- 单账号采集 ----
-    def _collect_account(self, acc, task_id, target_date, dedup, on_progress, idx, total):
+    def _collect_account(self, acc, task_id, target_date, on_progress, idx, total):
+        """采集单个账号（含重试）。
+
+        ⚠️ 每次尝试都在 _collect_once 内新建去重集合 —— 重试时不复用，
+        否则「第 1 次尝试已采到的作品」会在第 2 次尝试里被当成重复而全部跳过。
+        """
         last_error = ""
         login_required = False
         attempts = 0
@@ -190,7 +202,7 @@ class CollectEngine:
             if self._stopped():
                 return self._result(acc, target_date, 0, "skipped", "任务已停止", {}, [])
             try:
-                result = self._collect_once(acc, task_id, target_date, dedup,
+                result = self._collect_once(acc, task_id, target_date,
                                             on_progress, idx, total, attempt)
                 self._rate_backoff = 0  # 采集成功，退避等级清零
                 return result
@@ -216,27 +228,45 @@ class CollectEngine:
         diag = {"login_required": login_required, "attempts": attempts or self.max_retry}
         return self._result(acc, target_date, 0, "failed", last_error, diag, [])
 
-    def _collect_once(self, acc, task_id, target_date, dedup, on_progress, idx, total, attempt):
+    def _collect_once(self, acc, task_id, target_date, on_progress, idx, total, attempt):
         diag = {
             "found": 0, "date_resolved": 0, "date_unconfirmed": 0,
             "duplicates": 0, "collected": 0,
             "attempts": attempt,
+            "author_nickname": "",   # 账号昵称：从首个带昵称的作品上取（零额外请求）
         }
         collected: List[Video] = []
+        # 去重范围 = **本账号 + 本次采集**。
+        # 每次调用都新建集合：
+        #   · 不加载库中已有 ID（否则重新抓取时最新作品会被跳过 —— 见 run() 说明）
+        #   · 不跨重试复用（否则第 2 次尝试会把第 1 次采到的作品全部跳过）
+        # 唯一作用是处理「同一作品在主页列表里出现两次」（如置顶作品），
+        # 避免同一个视频占用两个名额、导致最终拿到的不同作品数不足。
+        dedup = VideoDedup()
 
         def on_item(item):
             diag["found"] += 1
 
-            # 1) 本次任务内部去重（跨账号/重复条目）
+            # 0) 账号昵称：从首个带昵称的作品上取（放在最前，即使该作品随后被
+            #    去重跳过/已达数量而停止，也仍能拿到昵称用于账号页辨识）。
+            if not diag["author_nickname"]:
+                nick = (getattr(item, "nickname", "") or "").strip()
+                if nick:
+                    diag["author_nickname"] = nick
+
+            # 1) 同一账号内同一作品重复出现（置顶等）→ 跳过且不计数，
+            #    保证最终拿到的是 N 条**不同**的作品。
+            #    注意顺序：放在数量检查之前，这样重复条目能被准确统计（diagnostics）。
             if dedup.is_duplicate(item.video_id):
                 diag["duplicates"] += 1
                 self.db.insert_collect_log(
-                    task_id, acc.account_id, f"重复作品跳过 video_id={item.video_id}",
+                    task_id, acc.account_id,
+                    f"同一作品重复出现，跳过 video_id={item.video_id}",
                     level="info", video_id=item.video_id,
                 )
                 return True
 
-            # 2) 已达目标数量 → 停止（按主页时间倒序取最新 N 条）
+            # 2) 已达目标数量 → 立即停止（按主页倒序取最新 N 条，不看发布日期）
             if len(collected) >= acc.collect_count:
                 return False
 
@@ -285,6 +315,31 @@ class CollectEngine:
                      if k in profile_diag})
         diag["create_time_order"] = "descending" if self._is_descending(
             profile_diag.get("create_times", [])) else "unknown"
+
+        # 昵称（TikTok 显示名）：采集时顺手写回账号，零额外请求。
+        # 优先用 engine 自己从作品上收集的；collector 的 diag 作为兜底。
+        # 用途：账号管理页显示昵称，便于辨识账号与分类。
+        nickname = ((diag.get("author_nickname") or "")
+                    or (profile_diag.get("author_nickname") or "")).strip()
+        if nickname:
+            try:
+                if self.db.set_account_display_name(acc.account_id, nickname):
+                    self.logger.info("账号 @%s 昵称已更新：%s", acc.username, nickname)
+            except Exception as exc:  # noqa: BLE001 —— 昵称失败不影响采集
+                self.logger.warning("账号 @%s 昵称写入失败: %s", acc.username, exc)
+
+        # 可观测性：这两个信号用来区分「账号真的没作品」与「页面/监听异常」。
+        # 2026-09-27 曾因「item_list 响应监听晚于页面导航」导致首屏最新一批被静默丢弃，
+        # 表面现象是「拿到更旧的作品 / 数量对不上」，但日志里毫无痕迹 —— 故补上这两条告警。
+        if profile_diag.get("item_list_requests", 0) == 0:
+            self.logger.warning(
+                "账号 @%s 未捕获到任何 item_list 响应（页面加载异常或接口变更？）",
+                acc.username)
+        if len(collected) > 1 and diag["create_time_order"] != "descending":
+            self.logger.warning(
+                "账号 @%s 作品顺序非时间倒序（create_time_order=%s）—— "
+                "可能漏掉了首屏最新的一批，请检查采集结果",
+                acc.username, diag["create_time_order"])
 
         status = self._status_for(acc.collect_count, len(collected))
         return self._result(acc, target_date, len(collected), status, "", diag, collected)

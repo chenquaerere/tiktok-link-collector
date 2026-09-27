@@ -24,6 +24,7 @@ from app.chat.models import (
     ChatTarget,
 )
 from app.collector.exceptions import LoginRequired
+from app.core.regions import account_id_from_label, account_label
 from .. import emoji as emoji_util
 
 from ..theme import COLORS, FONT
@@ -294,7 +295,7 @@ class ChatPage(BasePage):
     # ---------------- 数据 ----------------
     def refresh(self) -> None:
         rows = self.ctx.account_service.list(enabled_only=True)
-        names = [f"@{r['username']}" for r in rows] or ["（无账号）"]
+        names = [account_label(r) for r in rows] or ["（无账号）"]
         self._account_menu.configure(values=names)
         if rows:
             self._account_menu.set(names[0])
@@ -345,8 +346,9 @@ class ChatPage(BasePage):
         return svc
 
     def _current_account(self):
-        name = (self._account_menu.get() or "").lstrip("@").strip()
-        if not name or name == "（无账号）":
+        # 下拉显示名可能是「越南 · @user」，统一用 account_id_from_label 反解
+        name = account_id_from_label(self._account_menu.get())
+        if not name:
             return None
         row = self.ctx.db.get_account(name)
         if row:

@@ -61,6 +61,25 @@ class TestVideoParser(unittest.TestCase):
         parsed = self.parser.parse_item_list(body)
         self.assertEqual(len(parsed), 4)
 
+    def test_author_nickname_parsed(self):
+        """昵称来自 item_list 的 author.nickname（账号管理页用于辨识账号）。"""
+        body = json.dumps({"itemList": [
+            {"id": "7689051423832575252", "createTime": 1700000000,
+             "author": {"uniqueId": "user_a", "nickname": "小美"}},
+        ]})
+        items = self.parser.parse_item_list(body)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].nickname, "小美")
+        self.assertEqual(items[0].username, "user_a")
+
+    def test_nickname_missing_is_empty(self):
+        """items 里没有 nickname 时取空串，不得报错。"""
+        body = json.dumps({"itemList": [
+            {"id": "7689051423832575252", "createTime": 1700000000,
+             "author": {"uniqueId": "user_a"}},
+        ]})
+        self.assertEqual(self.parser.parse_item_list(body)[0].nickname, "")
+
     def test_order_preserved_descending(self):
         body = make_item_list(today_items())
         times = [i.raw_publish_time for i in self.parser.parse_item_list(body)]

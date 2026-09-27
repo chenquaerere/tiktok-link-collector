@@ -42,6 +42,7 @@ class Account:
     profile_url: str
     display_name: str = ""
     remark: str = ""
+    region: str = ""                     # 地区分类（越南/缅甸/…，空 = 未分类）
     enabled: bool = True
     login_status: str = "unknown"
     collect_count: int = 4
@@ -56,6 +57,7 @@ class ParsedVideoItem:
     """从页面解析出的单条作品原始数据。"""
     video_id: str
     username: str
+    nickname: str = ""               # 作者昵称（TikTok 显示名，来自 item_list 的 author.nickname）
     raw_url: str = ""
     raw_publish_time: Any = None  # ISO str / epoch / 相对文本 / None
     time_source: str = "unknown"  # iso / epoch / relative / dom / none

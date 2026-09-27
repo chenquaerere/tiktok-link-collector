@@ -1,4 +1,4 @@
-"""任务调度测试：单账号失败隔离、重试、停止、恢复（去重不重复）。"""
+"""任务调度测试：单账号失败隔离、重试、停止、每次抓取均取最新 N 条（无跨运行去重）。"""
 from __future__ import annotations
 
 import unittest
@@ -102,16 +102,51 @@ class TestTaskRunner(unittest.TestCase):
         self.assertEqual(results[0].status, "completed")
         self.assertEqual(results[2].status, "skipped")
 
-    def test_resume_skips_duplicates_and_fills(self):
-        # 去重器已有 101、102 → 跳过后继续采新的（新语义：不足会用更早作品补足）
-        dedup = VideoDedup(initial={"101", "102"})
-        runner = TaskRunner(_resolver(), dedup=dedup)
+    def test_no_cross_run_dedup_returns_newest(self):
+        """★ 回归：不得再有「跨运行去重」。
+
+        旧行为（已废弃）：去重器预载**库中已有 ID**，采集时把「已采过的作品」当重复跳过，
+        于是最新的 101/102 被跳过、只拿到 103~106 —— 既不是最新，也可能凑不够数量。
+        用户要求（2026-09-27）：不管之前采过没有，每次抓取都从最新一条开始取满数量。
+        """
+        dedup = VideoDedup(initial={"101", "102"})   # 模拟「库里已经有这两条」
+        self.assertEqual(len(dedup), 2)
+        runner = TaskRunner(_resolver())
         provider = self._provider()
         results = runner.run([_acc("acc_A", "user_A", count=4)],
                              lambda acc: provider.fetch("A"), TARGET)
         self.assertEqual(results[0].actual_count, 4)
         self.assertEqual({v.video_id for v in results[0].videos},
-                         {"103", "104", "105", "106"})
+                         {"101", "102", "103", "104"},
+                         "必须包含最新的 101/102，不能被历史采集记录挤掉")
+
+    def test_rerun_returns_identical_newest_set(self):
+        """★ 回归：同一账号连跑两次，结果必须完全一致（重新抓取 = 重新拿最新 N 条）。"""
+        provider = self._provider()
+
+        def fetcher(_acc_):
+            return provider.fetch("A")
+
+        first = TaskRunner(_resolver()).run([_acc("acc_A", "user_A", 4)], fetcher, TARGET)[0]
+        second = TaskRunner(_resolver()).run([_acc("acc_A", "user_A", 4)], fetcher, TARGET)[0]
+        ids1 = [v.video_id for v in first.videos]
+        ids2 = [v.video_id for v in second.videos]
+        self.assertEqual(ids1, ids2, "两次抓取结果必须一致")
+        self.assertEqual(ids1, ["101", "102", "103", "104"])
+
+    def test_duplicate_within_same_run_only_once(self):
+        """同一账号同一次采集内，同一作品重复出现（置顶等）只算一次，不占两个名额。"""
+        provider = self._provider()
+
+        def fetcher(_acc_):
+            items = provider.fetch("A")[:4]
+            return items + items[:1]          # 第一条在列表里重复渲染一次
+
+        r = TaskRunner(_resolver()).run([_acc("acc_A", "user_A", 4)], fetcher, TARGET)[0]
+        ids = [v.video_id for v in r.videos]
+        self.assertEqual(len(ids), len(set(ids)), "结果里不得有重复视频")
+        self.assertEqual(ids, ["101", "102", "103", "104"])
+        self.assertEqual(r.diagnostics["duplicates"], 1)
 
     def test_summarize(self):
         # 用真实 runner 产出结果再汇总

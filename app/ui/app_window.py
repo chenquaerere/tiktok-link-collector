@@ -173,6 +173,47 @@ class AppWindow(ctk.CTk):
     def set_status(self, text: str) -> None:
         self.status_label.configure(text=text)
 
+    # ---- 退出清理 ----
+    def shutdown(self) -> None:
+        """取消所有常驻定时器。
+
+        Tk 的 after 绑定在解释器上，控件销毁不会自动取消 —— 窗口关掉后
+        回调仍会被触发，打印 `invalid command name ...` 并可能操作已销毁控件。
+        退出前统一取消（主窗口泵 / 各页面泵与自动刷新 / Toast 管理器）。
+        """
+        def cancel(holder, attr: str) -> None:
+            aid = getattr(holder, attr, None)
+            if not aid:
+                return
+            try:
+                holder.after_cancel(aid)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                setattr(holder, attr, None)
+            except Exception:  # noqa: BLE001
+                pass
+
+        cancel(self, "_ui_pump_id")
+        try:
+            for page in getattr(self, "pages", {}).values():
+                for attr in ("_pump_id", "_refresh_after"):
+                    cancel(page, attr)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.toast.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def destroy(self) -> None:
+        """销毁窗口前先取消定时器，避免退出时的无效回调报错。"""
+        try:
+            self.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        super().destroy()
+
     # ---- 线程安全 UI 调度 ----
     def ui_call(self, fn, *args) -> None:
         """把回调安全地排到 UI 线程执行。

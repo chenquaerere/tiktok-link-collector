@@ -43,6 +43,51 @@ class ProfileCollector:
         self.max_scrolls = max_scrolls
         self.idle_scrolls_before_stop = idle_scrolls_before_stop
 
+    def fetch_nickname(self, account: Account) -> str:
+        """只取账号昵称（TikTok 显示名），不采集作品。
+
+        数据来源与采集完全一致：首屏 `/api/post/item_list/` 响应里的
+        `author.nickname` —— **无需额外接口请求**，代价就是打开一次主页。
+        供「刷新昵称」功能给已有账号补昵称使用。
+
+        返回昵称；取不到（未登录/无作品/被风控）时返回空串。
+        """
+        context = self.browser.new_context(self.session.user_data_dir_for(account))
+        bodies: List[str] = []
+        page = None
+        try:
+            def on_response(resp):
+                try:
+                    if ("/api/post/item_list/" in resp.url
+                            and "json" in resp.headers.get("content-type", "")):
+                        body = resp.text()
+                        if body:
+                            bodies.append(body)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            # ⚠️ 监听必须在导航之前注册（首屏响应可能在 <1s 内返回）
+            page = self.provider.load_profile(context, account.username,
+                                              on_response=on_response)
+            self.session.ensure_login(page)
+            page.wait_for_timeout(self.initial_wait_ms)
+
+            for body in bodies:
+                for item in self.parser.parse_item_list(body):
+                    if item.nickname:
+                        return item.nickname.strip()
+            return ""
+        finally:
+            try:
+                if page is not None:
+                    page.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                context.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     def fetch(self, account: Account) -> List[ParsedVideoItem]:
         """满足旧 Fetcher 协议：一次性返回全部解析结果（测试/简单场景用）。"""
         out: List[ParsedVideoItem] = []
@@ -57,15 +102,15 @@ class ProfileCollector:
             "scrolls": 0,
             "stopped_by_callback": False,
             "rate_limited": False,
+            "author_nickname": "",   # 账号昵称：从 item_list 的 author.nickname 顺手取回
             "create_times": [],  # 记录 createTime 顺序，供排序可靠性诊断
         }
 
         context = self.browser.new_context(self.session.user_data_dir_for(account))
         try:
-            page = self.provider.load_profile(context, account.username)
-            self.session.ensure_login(page)  # 登录/验证失效抛 LoginRequired
-
-            # 监听 item_list 网络响应
+            # 监听 item_list 网络响应。
+            # ⚠️ 必须在导航**之前**注册（通过 load_profile 的 on_response 参数）：
+            #    首屏那次响应 = 最新一批作品，晚注册会漏掉它 → 只能拿到更旧的作品。
             queue: List[str] = []
 
             def on_response(resp):
@@ -82,9 +127,11 @@ class ProfileCollector:
                 except Exception:
                     pass
 
-            page.on("response", on_response)
+            page = self.provider.load_profile(context, account.username,
+                                              on_response=on_response)
+            self.session.ensure_login(page)  # 登录/验证失效抛 LoginRequired
 
-            # 等待首次 item_list 请求完成
+            # 等待首批响应落地
             page.wait_for_timeout(self.initial_wait_ms)
 
             emitted_ids = set()
@@ -99,6 +146,9 @@ class ProfileCollector:
                         emitted_ids.add(item.video_id)
                         diag["found"] += 1
                         new_items += 1
+                        # 昵称：零额外请求，从首个带昵称的作品上取
+                        if not diag["author_nickname"] and item.nickname:
+                            diag["author_nickname"] = item.nickname.strip()
                         if item.raw_publish_time is not None:
                             diag["create_times"].append(item.raw_publish_time)
                         # 交给上层；False → 停止本账号

@@ -71,6 +71,15 @@ class AppServices:
         self._engine = None
         self._collector = None
 
+        # 运行期标记：本次启动是否完成过作品采集。
+        # 采集结果页据此决定是否显示链接 —— 未采集则链接区保持空白，
+        # 不显示上次运行残留的链接（避免「没采却已显示」的误解）。
+        # 仅内存有效，不写库。
+        self.collected_this_session = False
+        # 最近一次采集任务 ID：结果页默认只显示「本次任务」采到的链接，
+        # 而不是库里全部历史（否则只采 1 个账号 3 条，却看到一堆旧链接）。
+        self.last_task_id = ""
+
     # ---- 采集引擎 ----
     def timezone(self) -> str:
         tz = str(self.config.get("timezone") or "").strip()
@@ -214,9 +223,21 @@ class AppServices:
         return target
 
     def close(self) -> None:
+        """退出清理：关闭 Playwright（若本次运行创建过）与数据库。
+
+        ⚠️ 必须 stop 浏览器：Playwright 的 driver 是独立子进程，
+        只关主窗口不 stop 会导致驱动进程残留（历史踩坑）。
+        """
+        try:
+            collector = getattr(self, "_collector", None)
+            browser = getattr(collector, "browser", None) if collector is not None else None
+            if browser is not None:
+                browser.stop()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             self.db.close()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
 

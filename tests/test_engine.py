@@ -158,6 +158,84 @@ class TestCollectEngine(unittest.TestCase):
         self.assertEqual(aids, ["a1", "a1", "a2"])
 
     # ---- 串行 & 失败隔离 ----
+    # ---- 每次抓取都重新取最新 N 条（不得因历史记录跳过）----
+    def test_rerun_returns_identical_newest_n(self):
+        """★ 回归：库里已有记录时，重新抓取必须仍然拿到同样的最新 N 条。
+
+        用户实测 bug（2026-09-24 有 40 条作品被标记「重复跳过」且从未入库）：
+        旧实现把**全库已有 video_id** 装进去重器 → 重新抓取时最新作品被当成
+        「重复」跳过 → 拿到的不是最新，或凑不够数量（用户回填时发现「少了两条链接」）。
+        要求：不管之前采过没有，每次重新抓取都从最新一条开始取满数量。
+        """
+        items = _today_items(4)                 # 模拟主页最新的 4 条
+        first = self._engine({"demo_alpha": items}).run(
+            [_acc("a1", "demo_alpha", 4)], TARGET)
+        ids_first = sorted(r["video_id"] for r in
+                           self.db.query("SELECT video_id FROM videos"))
+        self.assertEqual(first["new_videos"], 4)
+        self.assertEqual(len(ids_first), 4)
+
+        # 第二次抓取（同账号、主页内容不变）—— 结果必须完全一致
+        second = self._engine({"demo_alpha": items}).run(
+            [_acc("a1", "demo_alpha", 4)], TARGET)
+        ids_second = sorted(r["video_id"] for r in
+                            self.db.query("SELECT video_id FROM videos"))
+        self.assertEqual(second["new_videos"], 4, "重新抓取不得因历史记录而少采")
+        self.assertEqual(ids_second, ids_first, "两次抓取结果必须完全一致")
+        self.assertEqual(second["accounts"][0].status, "completed")
+
+    def test_newest_taken_even_when_older_rows_exist(self):
+        """★ 回归：库里已有「更旧的作品」时，也必须优先拿最新那条（不能跳过最新）。"""
+        # 第一次只采到昨天的 2 条（模拟历史记录）
+        self._engine({"demo_alpha": _yesterday_items(2)}).run(
+            [_acc("a1", "demo_alpha", 2)], TARGET)
+        old_ids = {r["video_id"] for r in self.db.query("SELECT video_id FROM videos")}
+        self.assertEqual(len(old_ids), 2)
+
+        # 主页现在有了更新的今天作品 → 采集必须拿到今天的（最新），而不是跳过它们
+        items = _today_items(2) + _yesterday_items(2)
+        s = self._engine({"demo_alpha": items}).run([_acc("a1", "demo_alpha", 2)], TARGET)
+        new_ids = [r["video_id"] for r in
+                   self.db.query("SELECT video_id FROM videos ORDER BY id")]
+        self.assertEqual(s["new_videos"], 2)
+        self.assertTrue(set(new_ids).isdisjoint(old_ids),
+                        "应替换为最新的今天作品，而不是跳过最新、保留旧的")
+        self.assertEqual(set(new_ids), {i.video_id for i in _today_items(2)})
+
+    def test_duplicate_within_profile_only_counted_once(self):
+        """同一作品在主页列表里重复出现（置顶）时不占两个名额。
+
+        注意：重复条目必须出现在「采满之前」—— 采满数量后采集器会立即停止
+        （不继续滚动，这是期望的性能行为），因此末尾的重复不会被检查。
+        """
+        base = _today_items(4)
+        items = [base[0]] + base                 # 第一条在开头再次出现 = 置顶作品
+        s = self._engine({"demo_alpha": items}).run([_acc("a1", "demo_alpha", 4)], TARGET)
+        self.assertEqual(s["new_videos"], 4, "4 条唯一作品都应采到")
+        self.assertEqual(self.db.count_videos(), 4)
+        d = s["accounts"][0].diagnostics
+        self.assertEqual(d["duplicates"], 1, "重复条目应被识别并跳过")
+        self.assertEqual({r["video_id"] for r in
+                          self.db.query("SELECT video_id FROM videos")},
+                         {i.video_id for i in base}, "入库的应是 4 条唯一作品")
+
+    # ---- 昵称（display_name）----
+    def test_nickname_written_during_collect(self):
+        """★ 采集时顺手写入昵称（零额外请求），供账号管理页辨识账号。"""
+        items = _today_items(2)
+        for it in items:
+            it.nickname = "我的昵称"
+        self._engine({"demo_alpha": items}).run([_acc("a1", "demo_alpha", 2)], TARGET)
+        self.assertEqual(self.db.get_account("a1")["display_name"], "我的昵称")
+
+    def test_nickname_absent_keeps_existing(self):
+        """取不到昵称时，不得覆盖账号已有的昵称。"""
+        self.db.insert_account(_acc("a1", "demo_alpha", 2))
+        self.db.set_account_display_name("a1", "原有昵称")
+        self._engine({"demo_alpha": _today_items(2)}).run(
+            [_acc("a1", "demo_alpha", 2)], TARGET)   # items 不带 nickname
+        self.assertEqual(self.db.get_account("a1")["display_name"], "原有昵称")
+
     def test_strict_serial_order(self):
         collector = MockCollector({
             "A": _today_items(1, "A"),

@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from app.core import regions as region_util
 from app.core.models import Account
 from app.db.database import Database
 
@@ -63,6 +64,14 @@ def parse_profile_url(raw: str) -> ParseResult:
     return ParseResult(False, error=f"无法识别该账号输入: {raw[:60]}")
 
 
+def _row_region(row) -> str:
+    """读取行里的地区（兼容未加列的历史库 / dict 行）。"""
+    try:
+        return row["region"] or ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
 class AccountService:
     """账号池管理。"""
 
@@ -70,7 +79,8 @@ class AccountService:
         self.db = db
 
     # ---- 单个 ----
-    def add(self, raw: str, collect_count: int = 4, remark: str = "") -> Tuple[bool, str]:
+    def add(self, raw: str, collect_count: int = 4, remark: str = "",
+            region: str = "") -> Tuple[bool, str]:
         """解析并新增账号。返回 (是否成功, 消息)。"""
         pr = parse_profile_url(raw)
         if not pr.ok:
@@ -81,15 +91,19 @@ class AccountService:
             profile_url=pr.profile_url,
             collect_count=collect_count,
             remark=remark,
+            region=region_util.normalize_region(region),
         )
         inserted = self.db.insert_account(account)
         if inserted:
-            return True, f"已添加 @{pr.username}"
+            tag = region_util.region_display(region)
+            suffix = f"（{tag}）" if region_util.normalize_region(region) else ""
+            return True, f"已添加 @{pr.username}{suffix}"
         return False, f"账号 @{pr.username} 已存在"
 
     def update(self, account_id: str, *, display_name: Optional[str] = None,
                remark: Optional[str] = None, collect_count: Optional[int] = None,
-               enabled: Optional[bool] = None) -> bool:
+               enabled: Optional[bool] = None,
+               region: Optional[str] = None) -> bool:
         row = self.db.get_account(account_id)
         if not row:
             return False
@@ -102,6 +116,10 @@ class AccountService:
             enabled=enabled if enabled is not None else bool(row["enabled"]),
             login_status=row["login_status"],
             collect_count=collect_count if collect_count is not None else row["collect_count"],
+            # ⚠️ region 必须显式回填：update_account 是「整行覆盖」式的 UPDATE，
+            #    漏了它会把已有地区写成空串（改采集数量时地区被清空的坑）。
+            region=(region_util.normalize_region(region) if region is not None
+                    else _row_region(row)),
         )
         self.db.update_account(acc)
         return True
@@ -113,13 +131,16 @@ class AccountService:
         return self.db.set_account_enabled(account_id, enabled)
 
     # ---- 批量 ----
-    def import_many(self, raws: List[str], collect_count: int = 4) -> dict:
+    def import_many(self, raws: List[str], collect_count: int = 4,
+                    region: str = "") -> dict:
         """批量导入账号。逐个解析，个别错误不阻断整体。
 
+        region 会应用到本批全部新账号（之后的批量「设置地区」仍可改）。
         返回：{"imported": [...], "failed": [...], "skipped": [...]}
         """
         result = {"imported": [], "failed": [], "skipped": []}
         seen = set()
+        region_clean = region_util.normalize_region(region)
         for raw in raws:
             raw = (raw or "").strip()
             if not raw:
@@ -136,6 +157,7 @@ class AccountService:
             account = Account(
                 account_id=pr.username, username=pr.username,
                 profile_url=pr.profile_url, collect_count=collect_count,
+                region=region_clean,
             )
             if self.db.insert_account(account):
                 result["imported"].append(pr.username)
@@ -143,6 +165,24 @@ class AccountService:
                 result["skipped"].append({"input": raw, "username": pr.username,
                                           "reason": "数据库中已存在"})
         return result
+
+    # ---- 地区分类 ----
+    def set_regions(self, account_ids: List[str], region: str) -> int:
+        """批量设置地区（传空串 = 取消分类）。返回受影响账号数。"""
+        return self.db.set_account_regions(account_ids,
+                                           region_util.normalize_region(region))
+
+    def region_options(self) -> List[str]:
+        """地区下拉选项 = 预置地区 ∪ 库中出现过的自定义地区。"""
+        return region_util.region_options(self.db.used_regions())
+
+    def region_stats(self, enabled_only: bool = False) -> List[tuple]:
+        """地区统计：[(地区显示名, 数量), ...]（空地区显示为「未分类」）。"""
+        return [(region_util.region_display(name), n)
+                for name, n in self.db.region_stats(enabled_only)]
+
+    def used_regions(self) -> List[str]:
+        return self.db.used_regions()
 
     # ---- 查询 ----
     def list(self, enabled_only: bool = False):

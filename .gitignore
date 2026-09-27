@@ -8,6 +8,9 @@ dist/
 .venv/
 venv/
 
+# 开发期误创建的坏符号链接（Windows 需管理员权限才能删，且无法提交）
+/null
+
 # 数据与运行时产物
 data/
 logs/

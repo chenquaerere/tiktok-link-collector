@@ -22,10 +22,8 @@ class TaskRunner:
         resolver: DateResolver,
         max_retry: int = 3,
         retry_wait: float = 0.0,
-        dedup: VideoDedup | None = None,
     ):
         self.resolver = resolver
-        self.dedup = dedup or VideoDedup()
         self.max_retry = max(0, max_retry)
         self.retry_wait = max(0.0, retry_wait)
         self._stop = threading.Event()
@@ -62,7 +60,11 @@ class TaskRunner:
                     account_id=acc.account_id,
                     username=acc.username,
                     resolver=self.resolver,
-                    dedup=self.dedup,
+                    # 每次尝试都用**全新**的去重集合，范围仅限「本账号本次采集」：
+                    #   · 不预载库中已有 video_id —— 否则重新抓取时最新作品会被当成
+                    #     「重复」跳过，导致拿到的不是最新、或数量不足（用户实测丢链接）；
+                    #   · 不跨重试复用 —— 否则第 2 次尝试会把第 1 次已采到的作品全跳过。
+                    dedup=VideoDedup(),
                 )
                 result.attempts = attempt
                 return result

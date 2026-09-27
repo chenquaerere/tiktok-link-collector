@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     profile_url TEXT NOT NULL UNIQUE,
     display_name TEXT NOT NULL DEFAULT '',
     remark TEXT NOT NULL DEFAULT '',
+    region TEXT NOT NULL DEFAULT '',          -- 地区分类（越南/缅甸/…，空串 = 未分类）
     enabled INTEGER NOT NULL DEFAULT 1,
     login_status TEXT NOT NULL DEFAULT 'unknown',
     collect_count INTEGER NOT NULL DEFAULT 4,
@@ -175,7 +176,39 @@ class Database:
                 self.conn.execute("PRAGMA foreign_keys = ON")
             else:
                 self.conn.executescript(SCHEMA)  # 幂等
+            self._ensure_columns()               # 增量补列（不动版本号）
             self.conn.commit()
+
+    # 增量列：新增字段一律登记在此，禁止靠递增 SCHEMA_VERSION 来加列
+    _EXTRA_COLUMNS = {
+        "accounts": [
+            ("region", "TEXT NOT NULL DEFAULT ''"),
+        ],
+    }
+
+    def _ensure_columns(self) -> None:
+        """为已存在的表补齐新增列（幂等）。
+
+        ⚠️ 为什么不能用 SCHEMA_VERSION：上面的分支在版本号不一致时会
+        **DROP 所有业务表并重建**（开发期适用）。正式使用后用户库里有账号/作品/
+        登录态记录，递增版本号 = 清空用户数据。因此加列一律走本方法：
+        PRAGMA table_info 检查 → 缺列才 ALTER TABLE ADD COLUMN。
+        """
+        for table, cols in self._EXTRA_COLUMNS.items():
+            try:
+                info = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+            except sqlite3.Error:
+                continue
+            if not info:                      # 表还不存在（应由 SCHEMA 建）
+                continue
+            existing = {row["name"] for row in info}
+            for name, ddl in cols:
+                if name in existing:
+                    continue
+                try:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                except sqlite3.Error:
+                    pass                      # 并发/重复添加，忽略
 
     # ---- 底层执行 ----
     def _execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
@@ -256,10 +289,11 @@ class Database:
         with self._lock:
             cur = self._execute(
                 "INSERT OR IGNORE INTO accounts(account_id, username, profile_url, display_name, "
-                "remark, enabled, login_status, collect_count, created_at, updated_at, "
-                "last_collect_time, last_collect_result) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "remark, region, enabled, login_status, collect_count, created_at, updated_at, "
+                "last_collect_time, last_collect_result) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (account.account_id, account.username, account.profile_url, account.display_name,
-                 account.remark, 1 if account.enabled else 0, account.login_status,
+                 account.remark, getattr(account, "region", "") or "",
+                 1 if account.enabled else 0, account.login_status,
                  account.collect_count, account.created_at or (now or _now_str()),
                  account.updated_at or (now or _now_str()),
                  account.last_collect_time, account.last_collect_result),
@@ -274,10 +308,70 @@ class Database:
         """更新账号（按 account_id）。返回是否有行受影响。"""
         with self._lock:
             cur = self._execute(
-                "UPDATE accounts SET display_name=?, remark=?, enabled=?, login_status=?, "
+                "UPDATE accounts SET display_name=?, remark=?, region=?, enabled=?, login_status=?, "
                 "collect_count=?, updated_at=? WHERE account_id=?",
-                (account.display_name, account.remark, 1 if account.enabled else 0,
+                (account.display_name, account.remark, getattr(account, "region", "") or "",
+                 1 if account.enabled else 0,
                  account.login_status, account.collect_count, _now_str(), account.account_id),
+            )
+            self._maybe_commit()
+            return cur.rowcount > 0
+
+    def set_account_regions(self, account_ids: List[str], region: str) -> int:
+        """批量设置地区（传空串 = 取消分类）。返回受影响行数。"""
+        ids = [str(a) for a in (account_ids or []) if a]
+        if not ids:
+            return 0
+        region = (region or "").strip()
+        with self._lock:
+            marks = ",".join("?" for _ in ids)
+            cur = self._execute(
+                f"UPDATE accounts SET region=?, updated_at=? WHERE account_id IN ({marks})",
+                (region, _now_str(), *ids),
+            )
+            self._maybe_commit()
+            return cur.rowcount
+
+    def region_stats(self, enabled_only: bool = False) -> List[tuple]:
+        """地区统计：[(地区名, 账号数), ...]，空地区用 '' 表示，按数量降序。"""
+        sql = "SELECT region, COUNT(*) AS c FROM accounts"
+        if enabled_only:
+            sql += " WHERE enabled = 1"
+        sql += " GROUP BY region ORDER BY c DESC, region"
+        return [(r["region"] or "", r["c"]) for r in self.query(sql)]
+
+    def used_regions(self) -> List[str]:
+        """库中已使用过的非空地区（自定义地区据此进入下拉选项）。"""
+        rows = self.query(
+            "SELECT DISTINCT region FROM accounts "
+            "WHERE region IS NOT NULL AND region != '' ORDER BY region")
+        return [r["region"] for r in rows if r["region"]]
+
+    def set_account_display_name(self, account_id: str, display_name: str) -> bool:
+        """更新账号昵称（TikTok 显示名，用于界面辨识）。
+
+        与 `update_account()` 不同：这里是**单列更新**，不会覆盖其它字段
+        （避免「整行覆盖式 UPDATE」误清空 region 等字段）。
+        值未变化时不写库，返回是否真正更新。
+        """
+        name = (display_name or "").strip()
+        if not name:
+            return False
+        with self._lock:
+            row = self._execute(
+                "SELECT display_name FROM accounts WHERE account_id = ?",
+                (account_id,)).fetchone()
+            if row is None:
+                return False
+            try:
+                current = row["display_name"] or ""
+            except (KeyError, IndexError, TypeError):
+                current = ""
+            if current == name:
+                return False
+            cur = self._execute(
+                "UPDATE accounts SET display_name=?, updated_at=? WHERE account_id=?",
+                (name, _now_str(), account_id),
             )
             self._maybe_commit()
             return cur.rowcount > 0
@@ -307,10 +401,21 @@ class Database:
             )
             self._maybe_commit()
 
-    def list_accounts(self, enabled_only: bool = False) -> List[sqlite3.Row]:
+    def list_accounts(self, enabled_only: bool = False,
+                      region: Optional[str] = None) -> List[sqlite3.Row]:
+        """列出账号。region 传入则按地区过滤（'' 表示只看未分类）。"""
+        sql = "SELECT * FROM accounts"
+        where: List[str] = []
+        params: List[Any] = []
         if enabled_only:
-            return self.query("SELECT * FROM accounts WHERE enabled = 1 ORDER BY id")
-        return self.query("SELECT * FROM accounts ORDER BY id")
+            where.append("enabled = 1")
+        if region is not None:
+            where.append("region = ?")
+            params.append(region)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id"
+        return self.query(sql, tuple(params))
 
     def count_accounts(self) -> int:
         row = self.query_one("SELECT COUNT(*) AS c FROM accounts")
