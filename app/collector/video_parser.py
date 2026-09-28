@@ -94,6 +94,11 @@ class VideoParser:
             video_id=vid,
             username=username,
             nickname=nickname,
+            # 置顶标记：2026-09-28 探针实测确认 —— 置顶条目 `isPinnedItem=true`，
+            # 普通条目为 null / 字段缺失。置顶作品会被排在列表**最前面**（不按时间），
+            # 若照单计入「最新 N 条」会挤掉真正新发布的作品（用户实测：2 个账号各
+            # 置顶 1 条 → 各少拿 1 条新作品），因此需要识别并跳过。
+            is_pinned=bool(o.get("isPinnedItem")),
             raw_url=f"https://www.tiktok.com/@{username}/video/{vid}" if username else "",
             raw_publish_time=create_time,   # Unix 秒（int/str 均可，DateResolver 会处理）
             time_source="epoch" if create_time is not None else "none",

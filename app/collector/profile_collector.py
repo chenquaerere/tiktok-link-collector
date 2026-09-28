@@ -103,7 +103,8 @@ class ProfileCollector:
             "stopped_by_callback": False,
             "rate_limited": False,
             "author_nickname": "",   # 账号昵称：从 item_list 的 author.nickname 顺手取回
-            "create_times": [],  # 记录 createTime 顺序，供排序可靠性诊断
+            "pinned_skipped": 0,     # 置顶作品条数（供诊断：置顶不占「最新 N 条」名额）
+            "create_times": [],  # 记录 createTime 顺序，供排序可靠性诊断（已排除置顶）
         }
 
         context = self.browser.new_context(self.session.user_data_dir_for(account))
@@ -149,7 +150,10 @@ class ProfileCollector:
                         # 昵称：零额外请求，从首个带昵称的作品上取
                         if not diag["author_nickname"] and item.nickname:
                             diag["author_nickname"] = item.nickname.strip()
-                        if item.raw_publish_time is not None:
+                        # 排序诊断：**排除置顶作品**再记录 createTime ——
+                        # 置顶作品被排在列表最前、时间却是旧的，会把「顺序是否
+                        # 时间倒序」的判定拉成异常，造成误告警。
+                        if item.raw_publish_time is not None and not item.is_pinned:
                             diag["create_times"].append(item.raw_publish_time)
                         # 交给上层；False → 停止本账号
                         if not on_item(item):

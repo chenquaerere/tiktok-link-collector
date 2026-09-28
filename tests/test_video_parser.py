@@ -86,5 +86,36 @@ class TestVideoParser(unittest.TestCase):
         self.assertEqual(times, sorted(times, reverse=True))
 
 
+class TestPinnedFlag(unittest.TestCase):
+    """置顶标记 `isPinnedItem` 解析。
+
+    2026-09-28 探针实测（donk2896）：置顶条目 `isPinnedItem=true`，普通条目为
+    null / 字段缺失。置顶作品被排在列表最前，需识别出来跳过（不占「最新 N 条」名额）。
+    """
+
+    def setUp(self):
+        self.parser = VideoParser()
+
+    def test_pinned_true_and_absent(self):
+        body = json.dumps({"itemList": [
+            {"id": "7000000000000000001", "createTime": 1790200000,
+             "author": {"uniqueId": "u"}, "isPinnedItem": True},
+            {"id": "7000000000000000002", "createTime": 1790200100,
+             "author": {"uniqueId": "u"}},
+            {"id": "7000000000000000003", "createTime": 1790200200,
+             "author": {"uniqueId": "u"}, "isPinnedItem": None},
+        ]})
+        flags = {i.video_id: i.is_pinned
+                 for i in self.parser.parse_item_list(body)}
+        self.assertTrue(flags["7000000000000000001"])
+        self.assertFalse(flags["7000000000000000002"])
+        self.assertFalse(flags["7000000000000000003"])
+
+    def test_default_false_for_normal_items(self):
+        items = self.parser.parse_item_list(make_item_list(today_items()))
+        self.assertTrue(items)
+        self.assertTrue(all(i.is_pinned is False for i in items))
+
+
 if __name__ == "__main__":
     unittest.main()

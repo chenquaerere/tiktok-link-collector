@@ -58,6 +58,7 @@ class ParsedVideoItem:
     video_id: str
     username: str
     nickname: str = ""               # 作者昵称（TikTok 显示名，来自 item_list 的 author.nickname）
+    is_pinned: bool = False          # 是否置顶作品（item_list.isPinnedItem）；置顶不占「最新 N 条」名额
     raw_url: str = ""
     raw_publish_time: Any = None  # ISO str / epoch / 相对文本 / None
     time_source: str = "unknown"  # iso / epoch / relative / dom / none

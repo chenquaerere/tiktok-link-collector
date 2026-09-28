@@ -22,7 +22,7 @@ import threading
 import time
 from typing import Callable, List, Optional
 
-from app.core.collect_logic import resolve_item
+from app.core.collect_logic import recent_dates, resolve_item
 from app.core.date_resolver import DateResolver
 from app.core.dedup import VideoDedup
 from app.core.models import (
@@ -117,6 +117,8 @@ class CollectEngine:
             "failed": 0, "login_required": 0, "skipped": 0,
             "target_total": 0, "actual_total": 0,
             "new_videos": 0, "duplicates": 0, "unconfirmed": 0,
+            "pinned_skipped": 0,     # 本次跳过的置顶作品总数（非近期，不占名额）
+            "pinned_collected": 0,   # 本次额外采集的近期置顶总数（今天/昨天发布）
             "accounts": [],
         }
 
@@ -152,6 +154,8 @@ class CollectEngine:
                 summary["new_videos"] += result.diagnostics.get("collected", 0)
                 summary["duplicates"] += result.diagnostics.get("duplicates", 0)
                 summary["unconfirmed"] += result.diagnostics.get("date_unconfirmed", 0)
+                summary["pinned_skipped"] += result.diagnostics.get("pinned_skipped", 0)
+                summary["pinned_collected"] += result.diagnostics.get("pinned_collected", 0)
 
                 if result.status == "completed":
                     summary["completed"] += 1
@@ -232,9 +236,15 @@ class CollectEngine:
         diag = {
             "found": 0, "date_resolved": 0, "date_unconfirmed": 0,
             "duplicates": 0, "collected": 0,
+            "pinned_skipped": 0,     # 置顶但非近期 → 跳过条数
+            "pinned_collected": 0,   # 置顶且为「今天/昨天」→ 额外采集条数（不占名额）
             "attempts": attempt,
             "author_nickname": "",   # 账号昵称：从首个带昵称的作品上取（零额外请求）
         }
+        # 「最新 N 条」的名额**只由非置顶作品占用**；近期置顶属于额外采集。
+        non_pinned_count = 0
+        # 近期日期集合（今天 / 昨天，按配置时区）—— 用于判断置顶是否值得额外采集
+        recent = recent_dates(self.resolver, 2)
         collected: List[Video] = []
         # 去重范围 = **本账号 + 本次采集**。
         # 每次调用都新建集合：
@@ -245,6 +255,7 @@ class CollectEngine:
         dedup = VideoDedup()
 
         def on_item(item):
+            nonlocal non_pinned_count
             diag["found"] += 1
 
             # 0) 账号昵称：从首个带昵称的作品上取（放在最前，即使该作品随后被
@@ -254,7 +265,32 @@ class CollectEngine:
                 if nick:
                     diag["author_nickname"] = nick
 
-            # 1) 同一账号内同一作品重复出现（置顶等）→ 跳过且不计数，
+            # 1) 置顶作品：**不占「最新 N 条」名额**（2026-09-28 用户实测修复）。
+            #    置顶被排在列表最前（不按发布时间），若照单计入会挤掉真正新发布的作品：
+            #    用户有 2 个账号各置顶 1 条，结果各少拿 1 条新作品。
+            #    依据 item_list 的 `isPinnedItem=true`（探针实测：置顶 true、普通 null）。
+            #    · 置顶发布于**今天 / 昨天** → 它本身就是新作品 → **额外采集**（结果多于 N 条）
+            #    · 其它（较旧的置顶）→ 跳过、不采集
+            extra_pinned = False
+            if getattr(item, "is_pinned", False):
+                resolve_item(item, self.resolver)   # 先解析时间才能判断日期
+                if (item.publish_date or "") not in recent:
+                    diag["pinned_skipped"] += 1
+                    self.db.insert_collect_log(
+                        task_id, acc.account_id,
+                        f"置顶作品跳过（非近期，不占名额） video_id={item.video_id}",
+                        level="info", video_id=item.video_id,
+                    )
+                    return True
+                extra_pinned = True
+                diag["pinned_collected"] += 1
+                self.db.insert_collect_log(
+                    task_id, acc.account_id,
+                    f"置顶作品额外采集（{item.publish_date}） video_id={item.video_id}",
+                    level="info", video_id=item.video_id,
+                )
+
+            # 2) 同一账号内同一作品重复出现 → 跳过且不计数，
             #    保证最终拿到的是 N 条**不同**的作品。
             #    注意顺序：放在数量检查之前，这样重复条目能被准确统计（diagnostics）。
             if dedup.is_duplicate(item.video_id):
@@ -266,11 +302,11 @@ class CollectEngine:
                 )
                 return True
 
-            # 2) 已达目标数量 → 立即停止（按主页倒序取最新 N 条，不看发布日期）
-            if len(collected) >= acc.collect_count:
+            # 3) 非置顶作品已取满 N 条 → 停止（额外采集的近期置顶不占名额）
+            if not extra_pinned and non_pinned_count >= acc.collect_count:
                 return False
 
-            # 3) 解析发布时间（尽力记录；无法确认照常采集，日期记空）
+            # 4) 解析发布时间（尽力记录；无法确认照常采集，日期记空）
             resolve_item(item, self.resolver)
             publish_time = ""
             publish_date = ""
@@ -281,7 +317,7 @@ class CollectEngine:
             else:
                 diag["date_unconfirmed"] += 1
 
-            # 4) 标准化 URL 并入库
+            # 5) 标准化 URL 并入库
             normalized, vid, _ = normalize_url(item.raw_url, username_hint=item.username or acc.username)
             video_id = vid or item.video_id
             video = Video(
@@ -303,12 +339,14 @@ class CollectEngine:
             dedup.mark(video_id)
             collected.append(video)
             diag["collected"] += 1
+            if not extra_pinned:
+                non_pinned_count += 1
             self._run_urls.append(video.video_url)
 
             self._emit(on_progress, idx, total, acc.username, "collecting",
                        {"video_id": video_id, "collected": len(collected)})
-            # 已达数量 → 停止本账号
-            return len(collected) < acc.collect_count
+            # 非置顶已达数量 → 停止本账号（额外采集的近期置顶不影响停止条件）
+            return non_pinned_count < acc.collect_count
 
         profile_diag = self.collector.collect(acc, on_item)
         diag.update({k: profile_diag[k] for k in ("scrolls", "item_list_requests")
@@ -341,7 +379,9 @@ class CollectEngine:
                 "可能漏掉了首屏最新的一批，请检查采集结果",
                 acc.username, diag["create_time_order"])
 
-        status = self._status_for(acc.collect_count, len(collected))
+        # 状态按「非置顶作品数」判定：额外采集的近期置顶不算入目标名额，
+        # 否则「只采到置顶、非置顶没采到」会被误判成完成。
+        status = self._status_for(acc.collect_count, non_pinned_count)
         return self._result(acc, target_date, len(collected), status, "", diag, collected)
 
     # ---- helpers ----

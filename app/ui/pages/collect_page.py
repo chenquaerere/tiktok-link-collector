@@ -614,6 +614,13 @@ class CollectPage(BasePage):
         msg = (f"共 {n} 个账号：完成 {summary['completed']} / 部分 {summary['partial']} / "
                f"无作品 {summary['empty']} / 失败 {summary['failed']}；"
                f"实际采到 {summary['actual_total']} 条链接，新增 {summary['new_videos']} 条")
+        # 置顶作品处理结果 —— 让用户看到程序正确处理了置顶
+        pinned_extra = int(summary.get("pinned_collected", 0) or 0)
+        pinned_skip = int(summary.get("pinned_skipped", 0) or 0)
+        if pinned_extra:
+            msg += f"；额外采集 {pinned_extra} 条置顶作品（今天/昨天发布，不占数量）"
+        if pinned_skip:
+            msg += f"；跳过 {pinned_skip} 条旧置顶作品（不计入数量）"
         color = COLORS["success"]
         level = "success"
         if self._paused or summary.get("status") == "stopped":

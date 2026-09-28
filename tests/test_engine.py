@@ -7,6 +7,8 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from app.collector.engine import CollectEngine
 from app.core.date_resolver import DateResolver
@@ -309,6 +311,149 @@ class TestCollectEngine(unittest.TestCase):
         eng2 = self._engine({"demo_alpha": _today_items(2)}, daily_links=log)
         eng2.run([_acc("a1", "demo_alpha", 10)], TARGET, task_id="TASK-X")
         self.assertEqual(len(log.load(TARGET)), 2)
+
+
+class TestPinnedItemsSkipped(unittest.TestCase):
+    """置顶作品必须跳过、**不占「最新 N 条」名额**（2026-09-28 用户实测修复）。
+
+    场景：主页列表 = [置顶(很旧), 新1, 新2, 新3]，采 3 条。
+    修复前：拿到 [置顶, 新1, 新2] —— 少一条新发布的作品（用户实际遇到）。
+    修复后：拿到 [新1, 新2, 新3]。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="engine_pin_")
+        self.db = Database(os.path.join(self.tmp, "t.db"))
+
+    def _run(self, listing, count=3):
+        engine = CollectEngine(self.db, MockCollector({"demo_alpha": listing}),
+                               DateResolver("Asia/Shanghai"))
+        return engine.run([_acc("a1", "demo_alpha", count)], TARGET)
+
+    @staticmethod
+    def _pin(video_id, create_time):
+        it = _vid_item(video_id, create_time, "demo_alpha")
+        it.is_pinned = True
+        return it
+
+    def test_single_pinned_skipped_and_fills(self):
+        items = _today_items(3, username="demo_alpha")
+        listing = [self._pin("1111111111111111101", 1700000000)] + items
+        s = self._run(listing, 3)
+        videos = s["accounts"][0].videos
+        self.assertEqual([v.video_id for v in videos], [i.video_id for i in items])
+        self.assertEqual(s["accounts"][0].diagnostics["pinned_skipped"], 1)
+        self.assertEqual(s["pinned_skipped"], 1)
+
+    def test_three_pinned_all_skipped(self):
+        """置顶上限 3 条时全部跳过，仍能取满 N 条。"""
+        items = _today_items(3, username="demo_alpha")
+        listing = [self._pin(f"22222222222222222{k:02d}", 1700000000 + k)
+                   for k in range(3)] + items
+        s = self._run(listing, 3)
+        self.assertEqual([v.video_id for v in s["accounts"][0].videos],
+                         [i.video_id for i in items])
+        self.assertEqual(s["pinned_skipped"], 3)
+
+    def test_no_pinned_behaviour_unchanged(self):
+        items = _today_items(4, username="demo_alpha")
+        s = self._run(items, 4)
+        self.assertEqual(len(s["accounts"][0].videos), 4)
+        self.assertEqual(s["pinned_skipped"], 0)
+
+    def test_pinned_never_enters_database(self):
+        items = _today_items(2, username="demo_alpha")
+        pin = self._pin("3333333333333333301", 1700000000)
+        self._run([pin] + items, 2)
+        ids = {r["video_id"] for r in self.db.query("SELECT video_id FROM videos")}
+        self.assertNotIn(pin.video_id, ids)
+        self.assertEqual(len(ids), 2)
+
+
+class TestRecentPinnedExtraCollected(unittest.TestCase):
+    """置顶作品发布于「今天 / 昨天」时，应**额外采集**（不占「最新 N 条」名额）。
+
+    用户规则（2026-09-28）：置顶作品的时间段是今天或者昨天，也把它拿下来；
+    原本拿 3 条，判断置顶是今天/昨天后加起来就是 4 条。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="engine_recent_pin_")
+        self.db = Database(os.path.join(self.tmp, "t.db"))
+        self.tz = ZoneInfo("Asia/Shanghai")
+
+    def _ts(self, days_ago=0, hours_ago=0):
+        now = datetime.now(self.tz)
+        return int((now - timedelta(days=days_ago, hours=hours_ago)).timestamp())
+
+    @staticmethod
+    def _items(n=3):
+        """n 条非置顶作品（3 天前起，确保不落在「今天/昨天」）。"""
+        return [_vid_item(f"50000000000000000{i}", 0, "demo_alpha") for i in range(n)]
+
+    def _build_items(self, n=3):
+        return [_vid_item(f"50000000000000000{i}", self._ts(days_ago=3 + i),
+                          "demo_alpha") for i in range(n)]
+
+    def _pin(self, vid, ts):
+        it = _vid_item(vid, ts, "demo_alpha")
+        it.is_pinned = True
+        return it
+
+    def _run(self, listing, count=3):
+        engine = CollectEngine(self.db, MockCollector({"demo_alpha": listing}),
+                               DateResolver("Asia/Shanghai"))
+        return engine.run([_acc("a1", "demo_alpha", count)], TARGET)
+
+    def test_today_pinned_extra_collected(self):
+        items = self._build_items(3)
+        pin = self._pin("5000000000000000901", self._ts(hours_ago=2))
+        s = self._run([pin] + items, 3)
+        r = s["accounts"][0]
+        self.assertEqual(len(r.videos), 4, "3 条非置顶 + 1 条今天置顶 = 4 条")
+        self.assertIn(pin.video_id, [v.video_id for v in r.videos])
+        self.assertEqual(r.diagnostics["pinned_collected"], 1)
+        self.assertEqual(r.diagnostics["pinned_skipped"], 0)
+        self.assertEqual(s["pinned_collected"], 1)
+        self.assertEqual(r.status, "completed")
+
+    def test_yesterday_pinned_extra_collected(self):
+        items = self._build_items(3)
+        pin = self._pin("5000000000000000902", self._ts(days_ago=1, hours_ago=1))
+        s = self._run([pin] + items, 3)
+        r = s["accounts"][0]
+        self.assertEqual(len(r.videos), 4)
+        self.assertIn(pin.video_id, [v.video_id for v in r.videos])
+        self.assertEqual(r.diagnostics["pinned_collected"], 1)
+
+    def test_two_days_ago_pinned_still_skipped(self):
+        """前天及更早的置顶 → 跳过，结果仍是 N 条。"""
+        items = self._build_items(3)
+        pin = self._pin("5000000000000000903", self._ts(days_ago=2, hours_ago=1))
+        s = self._run([pin] + items, 3)
+        r = s["accounts"][0]
+        self.assertEqual(len(r.videos), 3)
+        self.assertNotIn(pin.video_id, [v.video_id for v in r.videos])
+        self.assertEqual(r.diagnostics["pinned_skipped"], 1)
+        self.assertEqual(r.diagnostics["pinned_collected"], 0)
+
+    def test_recent_pinned_does_not_consume_slot(self):
+        """近期置顶不占名额：采 2 条非置顶 + 1 条近期置顶 = 3 条（而非 2 条）。"""
+        items = self._build_items(2)
+        pin = self._pin("5000000000000000904", self._ts(hours_ago=3))
+        s = self._run([pin] + items, 2)
+        r = s["accounts"][0]
+        self.assertEqual(len(r.videos), 3)
+        self.assertIn(pin.video_id, [v.video_id for v in r.videos])
+        self.assertEqual(r.status, "completed")
+
+    def test_recent_pinned_enters_database(self):
+        items = self._build_items(2)
+        pin = self._pin("5000000000000000905", self._ts(hours_ago=5))
+        self._run([pin] + items, 2)
+        ids = {r["video_id"] for r in self.db.query("SELECT video_id FROM videos")}
+        self.assertIn(pin.video_id, ids)
+        self.assertEqual(len(ids), 3)
 
 
 if __name__ == "__main__":

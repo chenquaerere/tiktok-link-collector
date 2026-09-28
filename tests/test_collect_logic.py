@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from app.core.collect_logic import collect_for_account
 from app.core.date_resolver import DateResolver
@@ -105,6 +107,84 @@ class TestCollectLogic(unittest.TestCase):
         self.assertEqual(d["found"], 5)        # 采满 4 条后停（含第 5 条的检查）
         self.assertEqual(d["collected"], 4)    # 最新 4 条
         self.assertEqual(d["date_resolved"], 4)
+
+
+class TestPinnedSkipped(unittest.TestCase):
+    """批量入口 collect_for_account 同样跳过置顶（与 engine._collect_once 行为一致）。"""
+
+    @staticmethod
+    def _mk(vid, ct, pinned=False):
+        from app.core.models import ParsedVideoItem
+        return ParsedVideoItem(
+            video_id=vid, username="u",
+            raw_url=f"https://www.tiktok.com/@u/video/{vid}",
+            raw_publish_time=ct, time_source="epoch", is_pinned=pinned)
+
+    def test_pinned_not_selected(self):
+        items = [self._mk("7000000000000000101", 1790200000, True),   # 置顶（旧）
+                 self._mk("7000000000000000102", 1790200100),
+                 self._mk("7000000000000000103", 1790200200)]
+        r = collect_for_account(items, target_date="2026-09-24", target_count=2,
+                                account_id="a1", username="u",
+                                resolver=DateResolver("Asia/Shanghai"),
+                                dedup=VideoDedup())
+        self.assertEqual([v.video_id for v in r.videos],
+                         ["7000000000000000102", "7000000000000000103"])
+        self.assertEqual(r.diagnostics["pinned_skipped"], 1)
+        self.assertEqual(r.actual_count, 2)
+
+    def test_no_pinned_unchanged(self):
+        items = [self._mk("7000000000000000201", 1790200000),
+                 self._mk("7000000000000000202", 1790200100)]
+        r = collect_for_account(items, target_date="2026-09-24", target_count=2,
+                                account_id="a1", username="u",
+                                resolver=DateResolver("Asia/Shanghai"),
+                                dedup=VideoDedup())
+        self.assertEqual(len(r.videos), 2)
+        self.assertEqual(r.diagnostics["pinned_skipped"], 0)
+
+
+class TestRecentPinnedExtraBatch(unittest.TestCase):
+    """批量入口 collect_for_account：近期置顶额外采集（与 engine 行为一致）。"""
+
+    tz = ZoneInfo("Asia/Shanghai")
+
+    @classmethod
+    def _ts(cls, days_ago=0, hours_ago=0):
+        now = datetime.now(cls.tz)
+        return int((now - timedelta(days=days_ago, hours=hours_ago)).timestamp())
+
+    @classmethod
+    def _mk(cls, vid, ct, pinned=False):
+        from app.core.models import ParsedVideoItem
+        return ParsedVideoItem(
+            video_id=vid, username="u",
+            raw_url=f"https://www.tiktok.com/@u/video/{vid}",
+            raw_publish_time=ct, time_source="epoch", is_pinned=pinned)
+
+    def _run(self, items, count):
+        return collect_for_account(items, target_date="2026-09-28", target_count=count,
+                                   account_id="a1", username="u",
+                                   resolver=DateResolver("Asia/Shanghai"),
+                                   dedup=VideoDedup())
+
+    def test_today_pinned_extra(self):
+        items = [self._mk("6000000000000000001", self._ts(hours_ago=2), True),
+                 self._mk("6000000000000000002", self._ts(days_ago=3)),
+                 self._mk("6000000000000000003", self._ts(days_ago=4))]
+        r = self._run(items, 2)
+        self.assertEqual(len(r.videos), 3, "2 条非置顶 + 1 条今天置顶 = 3 条")
+        self.assertEqual(r.diagnostics["pinned_collected"], 1)
+        self.assertEqual(r.actual_count, 3)
+
+    def test_old_pinned_skipped(self):
+        items = [self._mk("6000000000000000011", self._ts(days_ago=5), True),
+                 self._mk("6000000000000000012", self._ts(days_ago=3)),
+                 self._mk("6000000000000000013", self._ts(days_ago=4))]
+        r = self._run(items, 2)
+        self.assertEqual(len(r.videos), 2)
+        self.assertEqual(r.diagnostics["pinned_skipped"], 1)
+        self.assertEqual(r.diagnostics["pinned_collected"], 0)
 
 
 if __name__ == "__main__":
